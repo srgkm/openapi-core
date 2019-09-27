@@ -167,10 +167,10 @@ class TestSchemaUnmarshal(object):
         schema = Schema('string', schema_format=custom_format)
         value = 'x'
 
-        with pytest.raises(
-            InvalidSchemaValue, message='Failed to format value'
-        ):
+        with pytest.raises(InvalidSchemaValue) as exc:
             schema.unmarshal(value)
+
+            assert 'Failed to format value' in str(exc.message)
 
     def test_integer_valid(self):
         schema = Schema('integer')
