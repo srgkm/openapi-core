@@ -46,16 +46,16 @@ class Schema(object):
     }
 
     def __init__(
-            self, schema_type=None, model=None, properties=None, items=None,
+            self, schema_type=None, properties=None, items=None,
             schema_format=None, required=None, default=None, nullable=False,
             enum=None, deprecated=False, all_of=None, one_of=None,
             additional_properties=True, min_items=None, max_items=None,
             min_length=None, max_length=None, pattern=None, unique_items=False,
             minimum=None, maximum=None, multiple_of=None,
             exclusive_minimum=False, exclusive_maximum=False,
-            min_properties=None, max_properties=None, _source=None):
+            min_properties=None, max_properties=None, extensions=None,
+            _source=None):
         self.type = SchemaType(schema_type)
-        self.model = model
         self.properties = properties and dict(properties) or {}
         self.items = items
         self.format = schema_format
@@ -83,6 +83,8 @@ class Schema(object):
             if min_properties is not None else None
         self.max_properties = int(max_properties)\
             if max_properties is not None else None
+
+        self.extensions = extensions and dict(extensions) or {}
 
         self._all_required_properties_cache = None
         self._all_optional_properties_cache = None
@@ -198,50 +200,13 @@ class Schema(object):
 
     def unmarshal(self, value, custom_formatters=None, strict=True):
         """Unmarshal parameter from the value."""
-        if self.deprecated:
-            warnings.warn("The schema is deprecated", DeprecationWarning)
-        if value is None:
-            if not self.nullable:
-                raise UnmarshalError(
-                    "Null value for non-nullable schema", value, self.type)
-            return self.default
-
-        if self.enum and value not in self.enum:
-            raise UnmarshalError("Invalid value for enum: {0}".format(value))
-
-        unmarshal_mapping = self.get_unmarshal_mapping(
-            custom_formatters=custom_formatters, strict=strict)
-
-        if self.type is not SchemaType.STRING and value == '':
-            return None
-
-        unmarshal_callable = unmarshal_mapping[self.type]
-        try:
-            unmarshalled = unmarshal_callable(value)
-        except ValueError as exc:
-            raise UnmarshalValueError(value, self.type, exc)
-
-        return unmarshalled
-
-    def get_primitive_unmarshallers(self, **options):
-        from openapi_core.schema.schemas.unmarshallers import (
-            StringUnmarshaller, BooleanUnmarshaller, IntegerUnmarshaller,
-            NumberUnmarshaller,
+        from openapi_core.unmarshalling.schemas.factories import (
+            SchemaUnmarshallersFactory,
         )
-
-        unmarshallers_classes = {
-            SchemaType.STRING: StringUnmarshaller,
-            SchemaType.BOOLEAN: BooleanUnmarshaller,
-            SchemaType.INTEGER: IntegerUnmarshaller,
-            SchemaType.NUMBER: NumberUnmarshaller,
-        }
-
-        unmarshallers = dict(
-            (t, klass(**options))
-            for t, klass in unmarshallers_classes.items()
-        )
-
-        return unmarshallers
+        unmarshallers_factory = SchemaUnmarshallersFactory(
+            custom_formatters)
+        unmarshaller = unmarshallers_factory.create(self)
+        return unmarshaller(value, strict=strict)
 
     def _unmarshal_any(self, value, custom_formatters=None, strict=True):
         types_resolve_order = [
@@ -276,79 +241,3 @@ class Schema(object):
 
         log.warning("failed to unmarshal any type")
         return value
-
-    def _unmarshal_collection(self, value, custom_formatters=None, strict=True):
-        if not isinstance(value, (list, tuple)):
-            raise ValueError("Invalid value for collection: {0}".format(value))
-
-        f = functools.partial(
-            self.items.unmarshal,
-            custom_formatters=custom_formatters, strict=strict,
-        )
-        return list(map(f, value))
-
-    def _unmarshal_object(self, value, model_factory=None,
-                          custom_formatters=None, strict=True):
-        if not isinstance(value, (dict, )):
-            raise ValueError("Invalid value for object: {0}".format(value))
-
-        model_factory = model_factory or ModelFactory()
-
-        if self.one_of:
-            properties = None
-            for one_of_schema in self.one_of:
-                try:
-                    unmarshalled = self._unmarshal_properties(
-                        value, one_of_schema, custom_formatters=custom_formatters)
-                except (UnmarshalError, ValueError):
-                    pass
-                else:
-                    if properties is not None:
-                        log.warning("multiple valid oneOf schemas found")
-                        continue
-                    properties = unmarshalled
-
-            if properties is None:
-                log.warning("valid oneOf schema not found")
-
-        else:
-            properties = self._unmarshal_properties(
-              value, custom_formatters=custom_formatters)
-
-        return model_factory.create(properties, name=self.model)
-
-    def _unmarshal_properties(self, value, one_of_schema=None,
-                              custom_formatters=None, strict=True):
-        all_props = self.get_all_properties()
-        all_props_names = self.get_all_properties_names()
-        all_req_props_names = self.get_all_required_properties_names()
-
-        if one_of_schema is not None:
-            all_props.update(one_of_schema.get_all_properties())
-            all_props_names |= one_of_schema.\
-                get_all_properties_names()
-            all_req_props_names |= one_of_schema.\
-                get_all_required_properties_names()
-
-        value_props_names = value.keys()
-        extra_props = set(value_props_names) - set(all_props_names)
-
-        properties = {}
-        if self.additional_properties is not True:
-            for prop_name in extra_props:
-                prop_value = value[prop_name]
-                properties[prop_name] = self.additional_properties.unmarshal(
-                    prop_value, custom_formatters=custom_formatters)
-
-        for prop_name, prop in iteritems(all_props):
-            try:
-                prop_value = value[prop_name]
-            except KeyError:
-                if not prop.nullable and not prop.default:
-                    continue
-                prop_value = prop.default
-
-            properties[prop_name] = prop.unmarshal(
-                prop_value, custom_formatters=custom_formatters)
-
-        return properties
